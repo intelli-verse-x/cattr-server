@@ -1,13 +1,15 @@
-# Mirrored from intelli-verse-kube-infra/toba-prod/cattr/buildspec.yml for CodePipeline (CODE_ZIP source).
-# Edit the kube-infra copy first, then copy here so builds match GitOps.
+# Mirrored in intelli-verse-kube-infra/toba-prod/cattr/buildspec.yml
 #
-# Amazingcat registry auth (Dockerfile base images):
-#   Option A — CodeBuild env vars: AMAZINGCAT_REGISTRY_USER, AMAZINGCAT_REGISTRY_PASSWORD
-#   Option B — SSM SecureString (same names as other /codebuild/* apps):
-#     /codebuild/cattr-server/AMAZINGCAT_REGISTRY_USER
-#     /codebuild/cattr-server/AMAZINGCAT_REGISTRY_PASSWORD
+# BUILD_STRATEGY (CodeBuild env, default dockerfile):
+#   dockerfile — full `docker build` (needs Amazingcat GitLab registry login).
+#   hub-retag  — NO Amazingcat: pull public Docker Hub image, retag to ECR, deploy.
+#              Same runtime as before (e.g. amazingcat/cattr:3.4.3); your repo
+#              source is NOT compiled into the image in this mode.
+#
+# hub-retag optional env:
+#   PUBLIC_CATTR_IMAGE  default docker.io/amazingcat/cattr:3.4.3
+#
 # CodeBuild: privileged Docker ON.
-# Each CodeBuild phase starts a new shell — REPOSITORY_URI / IMAGE_TAG are set per phase.
 version: 0.2
 run-as: root
 
@@ -19,48 +21,60 @@ phases:
       - export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-970547373533}"
       - export EKS_CLUSTER_NAME="${EKS_CLUSTER_NAME:-ai-cart-auto-cluster}"
       - export K8S_NAMESPACE="${K8S_NAMESPACE:-toba-prod}"
+      - export BUILD_STRATEGY="${BUILD_STRATEGY:-dockerfile}"
       - export REPOSITORY_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/cattr-server"
       - export COMMIT_HASH=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-7)
       - if [ -z "$COMMIT_HASH" ]; then export COMMIT_HASH="nogit"; fi
       - export IMAGE_TAG="${COMMIT_HASH}-b${CODEBUILD_BUILD_NUMBER}"
-      - echo "IMAGE_TAG=$IMAGE_TAG"
-      - |
-        if [ -z "$AMAZINGCAT_REGISTRY_USER" ]; then
-          export AMAZINGCAT_REGISTRY_USER=$(aws ssm get-parameter --name "/codebuild/cattr-server/AMAZINGCAT_REGISTRY_USER" --with-decryption --region "$AWS_REGION" --query "Parameter.Value" --output text 2>/dev/null || true)
-        fi
-      - |
-        if [ -z "$AMAZINGCAT_REGISTRY_PASSWORD" ]; then
-          export AMAZINGCAT_REGISTRY_PASSWORD=$(aws ssm get-parameter --name "/codebuild/cattr-server/AMAZINGCAT_REGISTRY_PASSWORD" --with-decryption --region "$AWS_REGION" --query "Parameter.Value" --output text 2>/dev/null || true)
-        fi
-      - |
-        if [ -z "$AMAZINGCAT_REGISTRY_USER" ] || [ -z "$AMAZINGCAT_REGISTRY_PASSWORD" ]; then
-          echo "Missing Amazingcat registry credentials."
-          echo "Set CodeBuild env vars AMAZINGCAT_REGISTRY_* OR create SSM parameters:"
-          echo "  /codebuild/cattr-server/AMAZINGCAT_REGISTRY_USER"
-          echo "  /codebuild/cattr-server/AMAZINGCAT_REGISTRY_PASSWORD"
-          exit 1
-        fi
-      - echo "$AMAZINGCAT_REGISTRY_PASSWORD" | docker login registry.git.amazingcat.net -u "$AMAZINGCAT_REGISTRY_USER" --password-stdin
+      - echo "IMAGE_TAG=$IMAGE_TAG BUILD_STRATEGY=$BUILD_STRATEGY"
       - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
       - |
         if ! aws ecr describe-repositories --repository-names cattr-server --region "$AWS_REGION" 2>/dev/null; then
           aws ecr create-repository --repository-name cattr-server --region "$AWS_REGION" --image-scanning-configuration scanOnPush=true || true
         fi
+      - |
+        if [ "$BUILD_STRATEGY" = "hub-retag" ]; then
+          echo "hub-retag: skip registry.git.amazingcat.net (public Hub image only)"
+        else
+          if [ -z "$AMAZINGCAT_REGISTRY_USER" ]; then
+            export AMAZINGCAT_REGISTRY_USER=$(aws ssm get-parameter --name "/codebuild/cattr-server/AMAZINGCAT_REGISTRY_USER" --with-decryption --region "$AWS_REGION" --query "Parameter.Value" --output text 2>/dev/null || true)
+          fi
+          if [ -z "$AMAZINGCAT_REGISTRY_PASSWORD" ]; then
+            export AMAZINGCAT_REGISTRY_PASSWORD=$(aws ssm get-parameter --name "/codebuild/cattr-server/AMAZINGCAT_REGISTRY_PASSWORD" --with-decryption --region "$AWS_REGION" --query "Parameter.Value" --output text 2>/dev/null || true)
+          fi
+          if [ -z "$AMAZINGCAT_REGISTRY_USER" ] || [ -z "$AMAZINGCAT_REGISTRY_PASSWORD" ]; then
+            echo "Missing Amazingcat credentials for dockerfile build."
+            echo "Set BUILD_STRATEGY=hub-retag on CodeBuild, or set SSM / env AMAZINGCAT_REGISTRY_*"
+            exit 1
+          fi
+          echo "$AMAZINGCAT_REGISTRY_PASSWORD" | docker login registry.git.amazingcat.net -u "$AMAZINGCAT_REGISTRY_USER" --password-stdin
+        fi
 
   build:
     commands:
-      - echo "=== Docker build (primary source root) ==="
       - export AWS_REGION="${AWS_REGION:-us-east-1}"
       - export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-970547373533}"
+      - export BUILD_STRATEGY="${BUILD_STRATEGY:-dockerfile}"
       - export REPOSITORY_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/cattr-server"
       - export COMMIT_HASH=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-7)
       - if [ -z "$COMMIT_HASH" ]; then export COMMIT_HASH="nogit"; fi
       - export IMAGE_TAG="${COMMIT_HASH}-b${CODEBUILD_BUILD_NUMBER}"
-      - echo "Building $REPOSITORY_URI:$IMAGE_TAG"
-      - export DOCKER_BUILDKIT=1
-      - docker build -t "$REPOSITORY_URI:latest" -t "$REPOSITORY_URI:$IMAGE_TAG" .
-      - docker push "$REPOSITORY_URI:latest"
-      - docker push "$REPOSITORY_URI:$IMAGE_TAG"
+      - |
+        if [ "$BUILD_STRATEGY" = "hub-retag" ]; then
+          export PUBLIC_CATTR_IMAGE="${PUBLIC_CATTR_IMAGE:-docker.io/amazingcat/cattr:3.4.3}"
+          echo "=== hub-retag: pull $PUBLIC_CATTR_IMAGE → $REPOSITORY_URI:$IMAGE_TAG ==="
+          docker pull "$PUBLIC_CATTR_IMAGE"
+          docker tag "$PUBLIC_CATTR_IMAGE" "$REPOSITORY_URI:$IMAGE_TAG"
+          docker tag "$PUBLIC_CATTR_IMAGE" "$REPOSITORY_URI:latest"
+          docker push "$REPOSITORY_URI:$IMAGE_TAG"
+          docker push "$REPOSITORY_URI:latest"
+        else
+          echo "=== docker build (Dockerfile) ==="
+          export DOCKER_BUILDKIT=1
+          docker build -t "$REPOSITORY_URI:latest" -t "$REPOSITORY_URI:$IMAGE_TAG" .
+          docker push "$REPOSITORY_URI:latest"
+          docker push "$REPOSITORY_URI:$IMAGE_TAG"
+        fi
 
   post_build:
     commands:
