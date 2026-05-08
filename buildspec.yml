@@ -1,7 +1,12 @@
 # Mirrored from intelli-verse-kube-infra/toba-prod/cattr/buildspec.yml for CodePipeline (CODE_ZIP source).
 # Edit the kube-infra copy first, then copy here so builds match GitOps.
 #
-# CodeBuild: privileged Docker ON. Set AMAZINGCAT_REGISTRY_USER / AMAZINGCAT_REGISTRY_PASSWORD on the project.
+# Amazingcat registry auth (Dockerfile base images):
+#   Option A — CodeBuild env vars: AMAZINGCAT_REGISTRY_USER, AMAZINGCAT_REGISTRY_PASSWORD
+#   Option B — SSM SecureString (same names as other /codebuild/* apps):
+#     /codebuild/cattr-server/AMAZINGCAT_REGISTRY_USER
+#     /codebuild/cattr-server/AMAZINGCAT_REGISTRY_PASSWORD
+# CodeBuild: privileged Docker ON.
 # Each CodeBuild phase starts a new shell — REPOSITORY_URI / IMAGE_TAG are set per phase.
 version: 0.2
 run-as: root
@@ -20,8 +25,19 @@ phases:
       - export IMAGE_TAG="${COMMIT_HASH}-b${CODEBUILD_BUILD_NUMBER}"
       - echo "IMAGE_TAG=$IMAGE_TAG"
       - |
+        if [ -z "$AMAZINGCAT_REGISTRY_USER" ]; then
+          export AMAZINGCAT_REGISTRY_USER=$(aws ssm get-parameter --name "/codebuild/cattr-server/AMAZINGCAT_REGISTRY_USER" --with-decryption --region "$AWS_REGION" --query "Parameter.Value" --output text 2>/dev/null || true)
+        fi
+      - |
+        if [ -z "$AMAZINGCAT_REGISTRY_PASSWORD" ]; then
+          export AMAZINGCAT_REGISTRY_PASSWORD=$(aws ssm get-parameter --name "/codebuild/cattr-server/AMAZINGCAT_REGISTRY_PASSWORD" --with-decryption --region "$AWS_REGION" --query "Parameter.Value" --output text 2>/dev/null || true)
+        fi
+      - |
         if [ -z "$AMAZINGCAT_REGISTRY_USER" ] || [ -z "$AMAZINGCAT_REGISTRY_PASSWORD" ]; then
-          echo "Set AMAZINGCAT_REGISTRY_USER and AMAZINGCAT_REGISTRY_PASSWORD on the CodeBuild project."
+          echo "Missing Amazingcat registry credentials."
+          echo "Set CodeBuild env vars AMAZINGCAT_REGISTRY_* OR create SSM parameters:"
+          echo "  /codebuild/cattr-server/AMAZINGCAT_REGISTRY_USER"
+          echo "  /codebuild/cattr-server/AMAZINGCAT_REGISTRY_PASSWORD"
           exit 1
         fi
       - echo "$AMAZINGCAT_REGISTRY_PASSWORD" | docker login registry.git.amazingcat.net -u "$AMAZINGCAT_REGISTRY_USER" --password-stdin
