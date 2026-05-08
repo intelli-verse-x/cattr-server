@@ -1,0 +1,101 @@
+name: Deploy main to EKS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: cattr-server-deploy-main
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 970547373533.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPO: cattr-server
+  EKS_CLUSTER: ai-cart-auto-cluster
+  K8S_NAMESPACE: toba-prod
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" 2>/dev/null || \
+            aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION"
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Login to Amazingcat GitLab container registry
+        env:
+          REG_USER: ${{ secrets.AMAZINGCAT_REGISTRY_USER }}
+          REG_PASS: ${{ secrets.AMAZINGCAT_REGISTRY_PASSWORD }}
+        run: |
+          if [ -z "$REG_USER" ] || [ -z "$REG_PASS" ]; then
+            echo "::error::Add repository secrets AMAZINGCAT_REGISTRY_USER and AMAZINGCAT_REGISTRY_PASSWORD for registry.git.amazingcat.net (read_registry). Without them, docker build cannot pull the wolfi base images from the Dockerfile."
+            exit 1
+          fi
+          echo "$REG_PASS" | docker login registry.git.amazingcat.net -u "$REG_USER" --password-stdin
+
+      - name: Set image tag
+        id: tag
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          echo "tag=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Image tag: $SHA"
+
+      - name: Build & push Docker image
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          docker build \
+            -t "$ECR_REGISTRY/$ECR_REPO:latest" \
+            -t "$ECR_REGISTRY/$ECR_REPO:${{ steps.tag.outputs.tag }}" \
+            .
+          docker push "$ECR_REGISTRY/$ECR_REPO" --all-tags
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "latest"
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: Deploy to EKS (app + init use same image)
+        run: |
+          TAG=${{ steps.tag.outputs.tag }}
+          IMG="$ECR_REGISTRY/$ECR_REPO:$TAG"
+          echo "Updating cattr-server images to $IMG ..."
+          kubectl set image deployment/cattr-server \
+            cattr="$IMG" \
+            bootstrap-mysql-and-perms="$IMG" \
+            -n "$K8S_NAMESPACE"
+
+      - name: Wait for rollout
+        run: |
+          echo "Waiting for cattr-server rollout..."
+          kubectl rollout status deployment/cattr-server -n "$K8S_NAMESPACE" --timeout=15m
+
+      - name: Verify pods
+        if: always()
+        run: |
+          echo "=== Pod Status ==="
+          kubectl get pods -n "$K8S_NAMESPACE" -l app=cattr-server -o wide
+          echo ""
+          echo "=== Recent Events ==="
+          kubectl get events -n "$K8S_NAMESPACE" --sort-by='.lastTimestamp' | grep -i cattr | tail -25
