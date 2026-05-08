@@ -1,0 +1,65 @@
+# AWS CodeBuild — used by CodePipeline (same pattern as leantime / quests-economy).
+# CodeBuild project must use a Docker-capable image with privileged mode ON.
+#
+# Environment variables on the CodeBuild project (plaintext or SSM-backed):
+#   AMAZINGCAT_REGISTRY_USER      — read_registry on registry.git.amazingcat.net
+#   AMAZINGCAT_REGISTRY_PASSWORD
+#
+# Optional overrides (defaults match toba-prod EKS):
+#   AWS_ACCOUNT_ID   default 970547373533
+#   AWS_REGION       default us-east-1
+#   EKS_CLUSTER_NAME default ai-cart-auto-cluster
+#   K8S_NAMESPACE    default toba-prod
+version: 0.2
+run-as: root
+
+phases:
+  pre_build:
+    commands:
+      - echo "=== Cattr CodeBuild pre_build ==="
+      - export AWS_REGION="${AWS_REGION:-us-east-1}"
+      - export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-970547373533}"
+      - export EKS_CLUSTER_NAME="${EKS_CLUSTER_NAME:-ai-cart-auto-cluster}"
+      - export K8S_NAMESPACE="${K8S_NAMESPACE:-toba-prod}"
+      - export REPOSITORY_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/cattr-server"
+      - COMMIT_HASH=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-7)
+      - if [ -z "$COMMIT_HASH" ]; then COMMIT_HASH="nogit"; fi
+      - export IMAGE_TAG="${COMMIT_HASH}-b${CODEBUILD_BUILD_NUMBER}"
+      - echo "IMAGE_TAG=$IMAGE_TAG"
+      - |
+        if [ -z "$AMAZINGCAT_REGISTRY_USER" ] || [ -z "$AMAZINGCAT_REGISTRY_PASSWORD" ]; then
+          echo "Set AMAZINGCAT_REGISTRY_USER and AMAZINGCAT_REGISTRY_PASSWORD on the CodeBuild project."
+          exit 1
+        fi
+      - echo "$AMAZINGCAT_REGISTRY_PASSWORD" | docker login registry.git.amazingcat.net -u "$AMAZINGCAT_REGISTRY_USER" --password-stdin
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      - |
+        if ! aws ecr describe-repositories --repository-names cattr-server --region "$AWS_REGION" 2>/dev/null; then
+          aws ecr create-repository --repository-name cattr-server --region "$AWS_REGION" --image-scanning-configuration scanOnPush=true || true
+        fi
+
+  build:
+    commands:
+      - echo "=== Docker build ==="
+      - export DOCKER_BUILDKIT=1
+      - docker build -t "$REPOSITORY_URI:latest" -t "$REPOSITORY_URI:$IMAGE_TAG" .
+      - docker push "$REPOSITORY_URI:latest"
+      - docker push "$REPOSITORY_URI:$IMAGE_TAG"
+
+  post_build:
+    commands:
+      - echo "=== EKS deploy ==="
+      - export AWS_REGION="${AWS_REGION:-us-east-1}"
+      - export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-970547373533}"
+      - export EKS_CLUSTER_NAME="${EKS_CLUSTER_NAME:-ai-cart-auto-cluster}"
+      - export K8S_NAMESPACE="${K8S_NAMESPACE:-toba-prod}"
+      - export REPOSITORY_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/cattr-server"
+      - COMMIT_HASH=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-7)
+      - if [ -z "$COMMIT_HASH" ]; then COMMIT_HASH="nogit"; fi
+      - export IMAGE_TAG="${COMMIT_HASH}-b${CODEBUILD_BUILD_NUMBER}"
+      - export IMG="${REPOSITORY_URI}:${IMAGE_TAG}"
+      - aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" --kubeconfig /root/.kube/config
+      - export KUBECONFIG=/root/.kube/config
+      - echo "Rolling deployment/cattr-server to $IMG ..."
+      - kubectl set image deployment/cattr-server cattr="$IMG" bootstrap-mysql-and-perms="$IMG" -n "$K8S_NAMESPACE"
+      - kubectl rollout status deployment/cattr-server -n "$K8S_NAMESPACE" --timeout=15m
