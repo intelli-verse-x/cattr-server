@@ -720,17 +720,27 @@ class IntervalController extends ItemController
                 continue;
             }
 
-            $screenshotIdValidationRule = $interval['has_screenshot'] ? ['screenshot_id' => 'required|uuid'] : [];
+            [$normStart, $normEnd] = CreateTimeIntervalRequest::normalizeIntervalBoundaries(
+                $interval['start_at'] ?? null,
+                $interval['end_at'] ?? null,
+                $timezone
+            );
+            $intervalPayload = array_merge($interval, [
+                'start_at' => $normStart,
+                'end_at' => $normEnd,
+            ]);
 
-            if ($interval['has_screenshot']) {
+            $screenshotIdValidationRule = $intervalPayload['has_screenshot'] ? ['screenshot_id' => 'required|uuid'] : [];
+
+            if ($intervalPayload['has_screenshot']) {
                 $mustNotCapture = $globalScreenshotsState === ScreenshotsState::FORBIDDEN;
                 $optionalCapture = $globalScreenshotsState === ScreenshotsState::OPTIONAL
-                    && isset($tasksScreenshotsState[$interval['task_id']]);
+                    && isset($tasksScreenshotsState[$intervalPayload['task_id']]);
 
-                if ($optionalCapture && $tasksScreenshotsState[$interval['task_id']] === ScreenshotsState::FORBIDDEN) {
+                if ($optionalCapture && $tasksScreenshotsState[$intervalPayload['task_id']] === ScreenshotsState::FORBIDDEN) {
                     $mustNotCapture = true;
                 } elseif ($optionalCapture
-                    && $tasksScreenshotsState[$interval['task_id']] === ScreenshotsState::OPTIONAL) {
+                    && $tasksScreenshotsState[$intervalPayload['task_id']] === ScreenshotsState::OPTIONAL) {
                     $mustNotCapture = $user->screenshots_state === ScreenshotsState::FORBIDDEN;
                 }
                 if ($mustNotCapture) {
@@ -739,16 +749,37 @@ class IntervalController extends ItemController
             }
 
             $intervalValidator = Validator::make(
-                $interval,
+                $intervalPayload,
                 array_merge(
-                    $validatorClass->getRules($interval['user_id'], $interval['start_at'], $interval['end_at']),
+                    $validatorClass->getRules(
+                        $intervalPayload['user_id'],
+                        $intervalPayload['start_at'],
+                        $intervalPayload['end_at']
+                    ),
                     $screenshotIdValidationRule
                 )
             );
 
             if ($intervalValidator->fails()) {
+                $failKeys = array_keys($intervalValidator->errors()->toArray());
+                $onlyEndAtOverlap = $failKeys === ['end_at'];
+                $existing = $onlyEndAtOverlap
+                    ? TimeInterval::where('user_id', (int) $intervalPayload['user_id'])
+                        ->where('start_at', Carbon::parse($intervalPayload['start_at'])->setTimezone($timezone))
+                        ->where('end_at', Carbon::parse($intervalPayload['end_at'])->setTimezone($timezone))
+                        ->first()
+                    : null;
+                if ($existing !== null) {
+                    $creationResult[] = [
+                        'interval' => $intervalPayload,
+                        'message' => __('validation.offline-sync.time_interval_added'),
+                        'success' => true,
+                        'idempotent_retry' => true,
+                    ];
+                    continue;
+                }
                 $creationResult[] = [
-                    'interval' => $interval,
+                    'interval' => $intervalPayload,
                     'message' => $intervalValidator->errors(),
                     'success' => false
                 ];

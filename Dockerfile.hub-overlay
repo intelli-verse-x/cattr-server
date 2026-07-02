@@ -1,0 +1,26 @@
+# Overlay build: official public Cattr runtime + Laravel code from THIS checkout.
+# Use when you have no Amazingcat registry login but need your PHP changes in prod.
+#
+# CodeBuild: BUILD_STRATEGY=hub-overlay
+#   optional: PUBLIC_CATTR_IMAGE=docker.io/amazingcat/cattr:3.4.3
+#
+# Copies only app/ + routes/ from the repo onto the Hub image filesystem so the
+# default Dockerfile (private registry, full composer build) stays untouched.
+
+ARG PUBLIC_CATTR_IMAGE=docker.io/amazingcat/cattr:3.4.3
+FROM ${PUBLIC_CATTR_IMAGE}
+
+USER root
+
+COPY app /app/backend/app
+COPY routes /app/backend/routes
+
+RUN set -eux; \
+    for u in www-data www; do \
+      if id "$u" >/dev/null 2>&1; then \
+        chown -R "$u:$u" /app/backend/app /app/backend/routes; \
+        break; \
+      fi; \
+    done
+
+# Do not change USER: keep the same process model as the public image (s6/php-fpm).

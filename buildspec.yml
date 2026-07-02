@@ -1,12 +1,12 @@
 # Mirrored in intelli-verse-kube-infra/toba-prod/cattr/buildspec.yml
 #
 # BUILD_STRATEGY (CodeBuild env, default dockerfile):
-#   dockerfile — full `docker build` (needs Amazingcat GitLab registry login).
-#   hub-retag  — NO Amazingcat: pull public Docker Hub image, retag to ECR, deploy.
-#              Same runtime as before (e.g. amazingcat/cattr:3.4.3); your repo
-#              source is NOT compiled into the image in this mode.
+#   dockerfile  — full `docker build -f Dockerfile` (needs Amazingcat GitLab registry login).
+#   hub-retag   — pull public Hub image, retag to ECR. No repo PHP in the image.
+#   hub-overlay — pull public Hub image, then `docker build -f Dockerfile.hub-overlay`:
+#                 official runtime + your repo `app/` + `routes/` copied in (no Amazingcat login).
 #
-# hub-retag optional env:
+# hub-retag / hub-overlay optional env:
 #   PUBLIC_CATTR_IMAGE  default docker.io/amazingcat/cattr:3.4.3
 #
 # CodeBuild: privileged Docker ON.
@@ -33,8 +33,8 @@ phases:
           aws ecr create-repository --repository-name cattr-server --region "$AWS_REGION" --image-scanning-configuration scanOnPush=true || true
         fi
       - |
-        if [ "$BUILD_STRATEGY" = "hub-retag" ]; then
-          echo "hub-retag: skip registry.git.amazingcat.net (public Hub image only)"
+        if [ "$BUILD_STRATEGY" = "hub-retag" ] || [ "$BUILD_STRATEGY" = "hub-overlay" ]; then
+          echo "$BUILD_STRATEGY: skip registry.git.amazingcat.net (public Hub image only)"
         else
           if [ -z "$AMAZINGCAT_REGISTRY_USER" ]; then
             export AMAZINGCAT_REGISTRY_USER=$(aws ssm get-parameter --name "/codebuild/cattr-server/AMAZINGCAT_REGISTRY_USER" --with-decryption --region "$AWS_REGION" --query "Parameter.Value" --output text 2>/dev/null || true)
@@ -44,7 +44,7 @@ phases:
           fi
           if [ -z "$AMAZINGCAT_REGISTRY_USER" ] || [ -z "$AMAZINGCAT_REGISTRY_PASSWORD" ]; then
             echo "Missing Amazingcat credentials for dockerfile build."
-            echo "Set BUILD_STRATEGY=hub-retag on CodeBuild, or set SSM / env AMAZINGCAT_REGISTRY_*"
+            echo "Set BUILD_STRATEGY=hub-retag or hub-overlay on CodeBuild, or set SSM / env AMAZINGCAT_REGISTRY_*"
             exit 1
           fi
           echo "$AMAZINGCAT_REGISTRY_PASSWORD" | docker login registry.git.amazingcat.net -u "$AMAZINGCAT_REGISTRY_USER" --password-stdin
@@ -60,16 +60,28 @@ phases:
       - if [ -z "$COMMIT_HASH" ]; then export COMMIT_HASH="nogit"; fi
       - export IMAGE_TAG="${COMMIT_HASH}-b${CODEBUILD_BUILD_NUMBER}"
       - |
+        export PUBLIC_CATTR_IMAGE="${PUBLIC_CATTR_IMAGE:-docker.io/amazingcat/cattr:3.4.3}"
         if [ "$BUILD_STRATEGY" = "hub-retag" ]; then
-          export PUBLIC_CATTR_IMAGE="${PUBLIC_CATTR_IMAGE:-docker.io/amazingcat/cattr:3.4.3}"
           echo "=== hub-retag: pull $PUBLIC_CATTR_IMAGE → $REPOSITORY_URI:$IMAGE_TAG ==="
           docker pull "$PUBLIC_CATTR_IMAGE"
           docker tag "$PUBLIC_CATTR_IMAGE" "$REPOSITORY_URI:$IMAGE_TAG"
           docker tag "$PUBLIC_CATTR_IMAGE" "$REPOSITORY_URI:latest"
           docker push "$REPOSITORY_URI:$IMAGE_TAG"
           docker push "$REPOSITORY_URI:latest"
+        elif [ "$BUILD_STRATEGY" = "hub-overlay" ]; then
+          echo "=== hub-overlay: pull $PUBLIC_CATTR_IMAGE then overlay repo app/ + routes/ ==="
+          docker pull "$PUBLIC_CATTR_IMAGE"
+          export DOCKER_BUILDKIT=1
+          docker build \
+            -f Dockerfile.hub-overlay \
+            --build-arg "PUBLIC_CATTR_IMAGE=$PUBLIC_CATTR_IMAGE" \
+            -t "$REPOSITORY_URI:latest" \
+            -t "$REPOSITORY_URI:$IMAGE_TAG" \
+            .
+          docker push "$REPOSITORY_URI:latest"
+          docker push "$REPOSITORY_URI:$IMAGE_TAG"
         else
-          echo "=== docker build (Dockerfile) ==="
+          echo "=== docker build (Dockerfile, Amazingcat base) ==="
           export DOCKER_BUILDKIT=1
           docker build -t "$REPOSITORY_URI:latest" -t "$REPOSITORY_URI:$IMAGE_TAG" .
           docker push "$REPOSITORY_URI:latest"
