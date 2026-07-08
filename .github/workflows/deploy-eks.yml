@@ -1,0 +1,22 @@
+# CodeBuild -> GitHub Actions migration (2026-07-08).
+# Replaces: CodePipeline cattr-server-pipeline + CodeBuild cattr-server-build.
+# Executes the repo's buildspec.yml unchanged via the shared gha-ci runner.
+# Rollback: re-point cattr-server-pipeline's trigger branch filter back to main.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: intelli-verse-x/gha-ci/.github/workflows/build-deploy.yml@main
+    secrets: inherit
+    with:
+      buildspec: buildspec.yml
+      timeout_minutes: 60
