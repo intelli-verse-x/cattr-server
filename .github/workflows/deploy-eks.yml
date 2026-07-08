@@ -18,6 +18,10 @@ env:
   AWS_DEFAULT_REGION: us-east-1
   AWS_ACCOUNT_ID: "970547373533"
   EKS_CLUSTER_NAME: ai-cart-auto-cluster
+  # Mirrors the old CodeBuild project env: retag the public Hub image, no
+  # Amazingcat GitLab registry login needed.
+  BUILD_STRATEGY: hub-retag
+  PUBLIC_CATTR_IMAGE: docker.io/amazingcat/cattr:3.4.3
 
 jobs:
   build-deploy:
