@@ -1,6 +1,6 @@
 # CodeBuild -> GitHub Actions migration (2026-07-08).
 # Replaces: CodePipeline cattr-server-pipeline + CodeBuild cattr-server-build.
-# Executes the repo's buildspec.yml unchanged via the shared gha-ci runner.
+# Executes the repo's buildspec.yml unchanged via gha-ci's run_buildspec.py.
 # Rollback: re-point cattr-server-pipeline's trigger branch filter back to main.
 name: Deploy
 
@@ -13,10 +13,47 @@ concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ACCOUNT_ID: "970547373533"
+  EKS_CLUSTER_NAME: ai-cart-auto-cluster
+
 jobs:
-  ci:
-    uses: intelli-verse-x/gha-ci/.github/workflows/build-deploy.yml@main
-    secrets: inherit
-    with:
-      buildspec: buildspec.yml
-      timeout_minutes: 60
+  build-deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout gha-ci tooling
+        uses: actions/checkout@v4
+        with:
+          repository: intelli-verse-x/gha-ci
+          token: ${{ secrets.GH_PAT }}
+          path: .gha-ci
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Docker Hub login (rate limits; user + root)
+        continue-on-error: true
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          echo "${{ secrets.DOCKER_PASSWORD }}" | sudo docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Run buildspec.yml (as root, like CodeBuild run-as root)
+        env:
+          GHA_RUN_NUMBER: ${{ github.run_number }}
+          CODEBUILD_RESOLVED_SOURCE_VERSION: ${{ github.sha }}
+          CODEBUILD_SRC_DIR: ${{ github.workspace }}
+          CODEBUILD_BUILD_SUCCEEDING: "1"
+        run: |
+          set -eo pipefail
+          export CODEBUILD_BUILD_NUMBER=$((10000 + GHA_RUN_NUMBER))
+          python3 .gha-ci/scripts/run_buildspec.py buildspec.yml --print-only > /tmp/ci-script.sh
+          sudo -E env "PATH=$PATH" bash /tmp/ci-script.sh
