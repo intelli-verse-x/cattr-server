@@ -61,3 +61,53 @@ jobs:
           export CODEBUILD_BUILD_NUMBER=$((10000 + GHA_RUN_NUMBER))
           python3 .gha-ci/scripts/run_buildspec.py buildspec.yml --print-only > /tmp/ci-script.sh
           sudo -E env "PATH=$PATH" bash /tmp/ci-script.sh
+
+  # ── Post-deploy smoke test (added 2026-07-10) ─────────────────────────────
+  # Verifies the rollout actually converged and the service answers before the
+  # run is called green. On failure: automatic `kubectl rollout undo` and the
+  # workflow fails, which fires the Discord deploy-alert (red card) and the CI
+  # Failure Sentinel.
+  smoke-test:
+    needs: build-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AWS_REGION: us-east-1
+      EKS_CLUSTER_NAME: ai-cart-auto-cluster
+      SMOKE_NAMESPACE: toba-prod
+      SMOKE_DEPLOYMENTS: "cattr-server"
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Connect to EKS
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+
+      - name: Rollout + pod health check
+        run: |
+          set -euo pipefail
+          for D in $SMOKE_DEPLOYMENTS; do
+            echo "=== rollout status: $D ==="
+            kubectl rollout status "deployment/$D" -n "$SMOKE_NAMESPACE" --timeout=6m
+            echo "=== crashloop check: $D ==="
+            BAD=$(kubectl get pods -n "$SMOKE_NAMESPACE" -l "app=$D" \
+              -o jsonpath='{range .items[*]}{.metadata.name} {range .status.containerStatuses[*]}{.state.waiting.reason} {end}{"\n"}{end}' \
+              | grep -E 'CrashLoopBackOff|ImagePullBackOff|ErrImagePull' || true)
+            if [ -n "$BAD" ]; then
+              echo "Unhealthy pods detected:"; echo "$BAD"; exit 1
+            fi
+          done
+
+      - name: Auto-rollback on smoke failure
+        if: failure()
+        run: |
+          for D in $SMOKE_DEPLOYMENTS; do
+            echo "=== rolling back: $D ==="
+            kubectl rollout undo "deployment/$D" -n "$SMOKE_NAMESPACE" || true
+            kubectl rollout status "deployment/$D" -n "$SMOKE_NAMESPACE" --timeout=6m || true
+          done
+          echo "Rolled back. Investigate the failed deploy before re-merging."
