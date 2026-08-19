@@ -18,7 +18,7 @@ phases:
     commands:
       - echo "=== Cattr CodeBuild pre_build ==="
       - export AWS_REGION="${AWS_REGION:-us-east-1}"
-      - export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-970547373533}"
+      - export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-803881282303}"
       - export EKS_CLUSTER_NAME="${EKS_CLUSTER_NAME:-ai-cart-auto-cluster}"
       - export K8S_NAMESPACE="${K8S_NAMESPACE:-toba-prod}"
       - export BUILD_STRATEGY="${BUILD_STRATEGY:-dockerfile}"
@@ -53,7 +53,7 @@ phases:
   build:
     commands:
       - export AWS_REGION="${AWS_REGION:-us-east-1}"
-      - export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-970547373533}"
+      - export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-803881282303}"
       - export BUILD_STRATEGY="${BUILD_STRATEGY:-dockerfile}"
       - export REPOSITORY_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/cattr-server"
       - export COMMIT_HASH=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-7)
@@ -80,7 +80,7 @@ phases:
     commands:
       - echo "=== EKS deploy ==="
       - export AWS_REGION="${AWS_REGION:-us-east-1}"
-      - export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-970547373533}"
+      - export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-803881282303}"
       - export EKS_CLUSTER_NAME="${EKS_CLUSTER_NAME:-ai-cart-auto-cluster}"
       - export K8S_NAMESPACE="${K8S_NAMESPACE:-toba-prod}"
       - export REPOSITORY_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/cattr-server"
