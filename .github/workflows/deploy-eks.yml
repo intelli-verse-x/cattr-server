@@ -30,17 +30,49 @@ env:
 
 jobs:
   build-deploy:
-    permissions:
-      id-token: write
-      contents: read
-    uses: intelli-verse-x/gha-ci/.github/workflows/build-deploy.yml@main
-    with:
-      aws_role_arn: arn:aws:iam::803881282303:role/github-actions-cattr-server-deploy
-      runs_on: ubuntu-24.04
-      timeout_minutes: 60
-      build_strategy: hub-retag
-      public_image: docker.io/amazingcat/cattr:3.4.3
-    secrets: inherit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout gha-ci tooling
+        uses: actions/checkout@v4
+        with:
+          repository: intelli-verse-x/gha-ci
+          token: ${{ secrets.GH_PAT }}
+          path: .gha-ci
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE }}
+          aws-region: us-east-1
+
+      - name: Assert target AWS account
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          if [ "$ACCOUNT_ID" != "803881282303" ]; then
+            echo "::error::Expected AWS account 803881282303, got $ACCOUNT_ID"
+            exit 1
+          fi
+
+      - name: Docker Hub login (rate limits; user + root)
+        continue-on-error: true
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          echo "${{ secrets.DOCKER_PASSWORD }}" | sudo docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Run buildspec.yml (as root, like CodeBuild run-as root)
+        env:
+          GHA_RUN_NUMBER: ${{ github.run_number }}
+          CODEBUILD_RESOLVED_SOURCE_VERSION: ${{ github.sha }}
+          CODEBUILD_SRC_DIR: ${{ github.workspace }}
+          CODEBUILD_BUILD_SUCCEEDING: "1"
+        run: |
+          set -eo pipefail
+          export CODEBUILD_BUILD_NUMBER=$((10000 + GHA_RUN_NUMBER))
+          python3 .gha-ci/scripts/run_buildspec.py buildspec.yml --print-only > /tmp/ci-script.sh
+          sudo -E env "PATH=$PATH" bash /tmp/ci-script.sh
 
   # ── Post-deploy smoke test (added 2026-07-10) ─────────────────────────────
   # Verifies the rollout actually converged and the service answers before the
